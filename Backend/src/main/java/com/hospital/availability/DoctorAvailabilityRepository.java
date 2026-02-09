@@ -8,9 +8,10 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 public interface DoctorAvailabilityRepository extends JpaRepository<DoctorAvailability, Long> {
-  List<DoctorAvailability> findByDoctorIdAndDayOfWeekOrderByStartTime(Long doctorId, DayOfWeek dayOfWeek);
+  List<DoctorAvailability> findByDoctorIdAndDayOfWeekAndIsActiveTrueOrderByStartTime(
+      Long doctorId, DayOfWeek dayOfWeek);
 
-  List<DoctorAvailability> findByDoctorIdOrderByDayOfWeekAscStartTimeAsc(Long doctorId);
+  List<DoctorAvailability> findByDoctorIdAndIsActiveTrueOrderByDayOfWeekAscStartTimeAsc(Long doctorId);
 
   void deleteByDoctorId(Long doctorId);
 
@@ -19,6 +20,7 @@ public interface DoctorAvailabilityRepository extends JpaRepository<DoctorAvaila
       from DoctorAvailability a
       where a.doctor.id = :doctorId
         and a.dayOfWeek = :dayOfWeek
+        and a.isActive = true
         and :startTime < a.endTime
         and :endTime > a.startTime
       """)

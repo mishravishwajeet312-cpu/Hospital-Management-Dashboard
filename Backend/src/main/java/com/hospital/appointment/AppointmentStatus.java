@@ -1,9 +1,9 @@
 package com.hospital.appointment;
 
 public enum AppointmentStatus {
-  PENDING,
+  REQUESTED,
   ACCEPTED,
   REJECTED,
-  CANCELLED,
-  COMPLETED
+  COMPLETED,
+  CANCELLED
 }

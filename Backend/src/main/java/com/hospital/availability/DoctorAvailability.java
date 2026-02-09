@@ -48,4 +48,7 @@ public class DoctorAvailability {
 
   @Column(nullable = false)
   private Integer slotDuration;
+
+  @Column(nullable = false)
+  private Boolean isActive;
 }

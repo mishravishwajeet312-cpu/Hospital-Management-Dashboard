@@ -18,6 +18,8 @@ import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.stream.Collectors;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -28,6 +30,7 @@ public class DoctorAvailabilityService {
   private final DoctorAvailabilityRepository availabilityRepository;
   private final DoctorRepository doctorRepository;
   private final AppointmentRepository appointmentRepository;
+  private static final int DEFAULT_SLOT_MINUTES = 30;
 
   public DoctorAvailabilityService(
       DoctorAvailabilityRepository availabilityRepository,
@@ -39,10 +42,9 @@ public class DoctorAvailabilityService {
   }
 
   public AvailabilityResponse createAvailability(AvailabilityCreateRequest request) {
-    validateTimeRange(request.getStartTime(), request.getEndTime(), request.getSlotDuration());
-
-    Doctor doctor = doctorRepository.findById(request.getDoctorId())
-        .orElseThrow(() -> new ResourceNotFoundException("Doctor not found"));
+    Doctor doctor = resolveDoctor(request.getDoctorId());
+    Integer slotDuration = request.getSlotDuration() == null ? DEFAULT_SLOT_MINUTES : request.getSlotDuration();
+    validateTimeRange(request.getStartTime(), request.getEndTime(), slotDuration);
 
     boolean overlap = availabilityRepository.existsOverlapping(
         doctor.getId(), request.getDayOfWeek(), request.getStartTime(), request.getEndTime());
@@ -55,7 +57,8 @@ public class DoctorAvailabilityService {
         .dayOfWeek(request.getDayOfWeek())
         .startTime(request.getStartTime())
         .endTime(request.getEndTime())
-        .slotDuration(request.getSlotDuration())
+        .slotDuration(slotDuration)
+        .isActive(request.getIsActive() == null ? Boolean.TRUE : request.getIsActive())
         .build();
 
     DoctorAvailability saved = availabilityRepository.save(availability);
@@ -64,7 +67,7 @@ public class DoctorAvailabilityService {
 
   public List<AvailabilityResponse> getAvailabilityForDoctor(Long doctorId) {
     ensureDoctorExists(doctorId);
-    return availabilityRepository.findByDoctorIdOrderByDayOfWeekAscStartTimeAsc(doctorId)
+    return availabilityRepository.findByDoctorIdAndIsActiveTrueOrderByDayOfWeekAscStartTimeAsc(doctorId)
         .stream()
         .map(this::toResponse)
         .collect(Collectors.toList());
@@ -75,7 +78,7 @@ public class DoctorAvailabilityService {
     DayOfWeek dayOfWeek = date.getDayOfWeek();
 
     List<DoctorAvailability> availabilityList =
-        availabilityRepository.findByDoctorIdAndDayOfWeekOrderByStartTime(doctorId, dayOfWeek);
+        availabilityRepository.findByDoctorIdAndDayOfWeekAndIsActiveTrueOrderByStartTime(doctorId, dayOfWeek);
 
     if (availabilityList.isEmpty()) {
       return new AvailableSlotsResponse(doctorId, date, List.of());
@@ -84,7 +87,7 @@ public class DoctorAvailabilityService {
     Set<LocalTime> bookedTimes = appointmentRepository
         .findByDoctorIdAndAppointmentDateAndStatusIn(doctorId, date, blockingStatuses())
         .stream()
-        .map(Appointment::getAppointmentTime)
+        .map(Appointment::getStartTime)
         .collect(Collectors.toSet());
 
     Set<LocalTime> slots = new TreeSet<>();
@@ -96,20 +99,30 @@ public class DoctorAvailabilityService {
   }
 
   public boolean isSlotAvailable(Long doctorId, LocalDate date, LocalTime time) {
+    try {
+      resolveSlotDurationMinutes(doctorId, date, time);
+      return true;
+    } catch (IllegalArgumentException ex) {
+      return false;
+    }
+  }
+
+  public int resolveSlotDurationMinutes(Long doctorId, LocalDate date, LocalTime time) {
     DayOfWeek dayOfWeek = date.getDayOfWeek();
     List<DoctorAvailability> availabilityList =
-        availabilityRepository.findByDoctorIdAndDayOfWeekOrderByStartTime(doctorId, dayOfWeek);
+        availabilityRepository.findByDoctorIdAndDayOfWeekAndIsActiveTrueOrderByStartTime(doctorId, dayOfWeek);
 
     if (availabilityList.isEmpty()) {
-      return false;
+      throw new IllegalArgumentException("Requested time is not within doctor's availability");
     }
 
     for (DoctorAvailability availability : availabilityList) {
       if (fitsSlot(availability, time)) {
-        return true;
+        return availability.getSlotDuration() == null ? DEFAULT_SLOT_MINUTES : availability.getSlotDuration();
       }
     }
-    return false;
+
+    throw new IllegalArgumentException("Requested time is not within doctor's availability");
   }
 
   private void ensureDoctorExists(Long doctorId) {
@@ -140,7 +153,7 @@ public class DoctorAvailabilityService {
   private List<LocalTime> generateSlots(DoctorAvailability availability, Set<LocalTime> bookedTimes) {
     List<LocalTime> slots = new ArrayList<>();
     LocalTime current = availability.getStartTime();
-    int duration = availability.getSlotDuration();
+    int duration = availability.getSlotDuration() == null ? DEFAULT_SLOT_MINUTES : availability.getSlotDuration();
 
     while (current.plusMinutes(duration).compareTo(availability.getEndTime()) <= 0) {
       if (!bookedTimes.contains(current)) {
@@ -154,22 +167,23 @@ public class DoctorAvailabilityService {
 
   private List<AppointmentStatus> blockingStatuses() {
     return List.of(
-        AppointmentStatus.PENDING,
+        AppointmentStatus.REQUESTED,
         AppointmentStatus.ACCEPTED,
         AppointmentStatus.COMPLETED
     );
   }
 
   private boolean fitsSlot(DoctorAvailability availability, LocalTime time) {
+    int duration = availability.getSlotDuration() == null ? DEFAULT_SLOT_MINUTES : availability.getSlotDuration();
     if (time.isBefore(availability.getStartTime())) {
       return false;
     }
-    if (time.plusMinutes(availability.getSlotDuration()).isAfter(availability.getEndTime())) {
+    if (time.plusMinutes(duration).isAfter(availability.getEndTime())) {
       return false;
     }
 
     long minutesFromStart = Duration.between(availability.getStartTime(), time).toMinutes();
-    return minutesFromStart % availability.getSlotDuration() == 0;
+    return minutesFromStart % duration == 0;
   }
 
   private AvailabilityResponse toResponse(DoctorAvailability availability) {
@@ -179,7 +193,27 @@ public class DoctorAvailabilityService {
         availability.getDayOfWeek(),
         availability.getStartTime(),
         availability.getEndTime(),
-        availability.getSlotDuration()
+        availability.getSlotDuration(),
+        availability.getIsActive()
     );
+  }
+
+  private Doctor resolveDoctor(Long doctorId) {
+    if (doctorId != null) {
+      return doctorRepository.findById(doctorId)
+          .orElseThrow(() -> new ResourceNotFoundException("Doctor not found"));
+    }
+
+    String email = currentUserEmail();
+    if (email == null) {
+      throw new IllegalArgumentException("Doctor id is required");
+    }
+    return doctorRepository.findByUserEmail(email)
+        .orElseThrow(() -> new ResourceNotFoundException("Doctor not found"));
+  }
+
+  private String currentUserEmail() {
+    Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+    return auth == null ? null : auth.getName();
   }
 }

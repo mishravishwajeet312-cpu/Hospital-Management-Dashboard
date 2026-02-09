@@ -13,6 +13,8 @@ public class AppointmentResponse {
   private Long patientId;
   private Long doctorId;
   private LocalDate appointmentDate;
-  private LocalTime appointmentTime;
+  private LocalTime startTime;
+  private LocalTime endTime;
   private AppointmentStatus status;
+  private String reason;
 }

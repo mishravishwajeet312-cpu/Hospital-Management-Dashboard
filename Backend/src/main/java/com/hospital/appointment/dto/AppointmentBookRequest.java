@@ -19,6 +19,10 @@ public class AppointmentBookRequest {
   @NotNull(message = "Appointment date is required")
   private LocalDate appointmentDate;
 
-  @NotNull(message = "Appointment time is required")
-  private LocalTime appointmentTime;
+  @NotNull(message = "Start time is required")
+  private LocalTime startTime;
+
+  private LocalTime endTime;
+
+  private String reason;
 }

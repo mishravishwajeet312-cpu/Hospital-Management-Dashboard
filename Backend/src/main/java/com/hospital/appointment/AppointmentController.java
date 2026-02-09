@@ -4,6 +4,7 @@ import com.hospital.appointment.dto.AppointmentBookRequest;
 import com.hospital.appointment.dto.AppointmentResponse;
 import com.hospital.appointment.dto.AppointmentRescheduleRequest;
 import com.hospital.appointment.dto.AppointmentStatusUpdateRequest;
+import com.hospital.availability.dto.AvailableSlotsResponse;
 import com.hospital.common.PagedResponse;
 import jakarta.validation.Valid;
 import java.time.LocalDate;
@@ -36,8 +37,18 @@ public class AppointmentController {
     return ResponseEntity.status(HttpStatus.CREATED).body(appointmentService.book(request));
   }
 
+  @PostMapping("/request")
+  public ResponseEntity<AppointmentResponse> request(@Valid @RequestBody AppointmentBookRequest request) {
+    return ResponseEntity.status(HttpStatus.CREATED).body(appointmentService.book(request));
+  }
+
   @GetMapping("/my")
   public ResponseEntity<List<AppointmentResponse>> myAppointments() {
+    return ResponseEntity.ok(appointmentService.getMyAppointments());
+  }
+
+  @GetMapping("/patient")
+  public ResponseEntity<List<AppointmentResponse>> patientAppointments() {
     return ResponseEntity.ok(appointmentService.getMyAppointments());
   }
 
@@ -90,5 +101,12 @@ public class AppointmentController {
         page.getTotalElements(),
         page.getTotalPages()
     ));
+  }
+
+  @GetMapping("/available-slots")
+  public ResponseEntity<AvailableSlotsResponse> availableSlots(
+      @RequestParam Long doctorId,
+      @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date) {
+    return ResponseEntity.ok(appointmentService.getAvailableSlots(doctorId, date));
   }
 }

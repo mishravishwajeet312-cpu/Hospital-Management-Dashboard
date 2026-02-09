@@ -39,7 +39,10 @@ public class Appointment {
   private LocalDate appointmentDate;
 
   @Column(nullable = false)
-  private LocalTime appointmentTime;
+  private LocalTime startTime;
+
+  @Column(nullable = false)
+  private LocalTime endTime;
 
   @Enumerated(EnumType.STRING)
   @Column(nullable = false)
@@ -52,6 +55,9 @@ public class Appointment {
   @ManyToOne(optional = false)
   @JoinColumn(name = "doctor_id", nullable = false)
   private Doctor doctor;
+
+  @Column(length = 500)
+  private String reason;
 
   @CreationTimestamp
   @Column(nullable = false, updatable = false)

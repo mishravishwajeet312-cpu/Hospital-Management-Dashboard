@@ -14,4 +14,5 @@ public class AvailabilityResponse {
   private LocalTime startTime;
   private LocalTime endTime;
   private Integer slotDuration;
+  private Boolean isActive;
 }

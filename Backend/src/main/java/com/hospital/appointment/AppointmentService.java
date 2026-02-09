@@ -11,8 +11,11 @@ import com.hospital.doctor.DoctorRepository;
 import com.hospital.patient.Patient;
 import com.hospital.patient.PatientRepository;
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.util.List;
 import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.domain.Specification;
@@ -25,6 +28,7 @@ import org.springframework.transaction.annotation.Transactional;
 @Transactional
 public class AppointmentService {
 
+  private static final Logger log = LoggerFactory.getLogger(AppointmentService.class);
   private final AppointmentRepository appointmentRepository;
   private final PatientRepository patientRepository;
   private final DoctorRepository doctorRepository;
@@ -42,16 +46,17 @@ public class AppointmentService {
   }
 
   public AppointmentResponse book(AppointmentBookRequest request) {
-    Patient patient = resolvePatientForBooking(request);
+    Patient patient = resolvePatientForBooking();
     Doctor doctor = doctorRepository.findById(request.getDoctorId())
         .orElseThrow(() -> new ResourceNotFoundException("Doctor not found"));
 
-    if (!availabilityService.isSlotAvailable(doctor.getId(), request.getAppointmentDate(), request.getAppointmentTime())) {
-      throw new IllegalArgumentException("Requested time is not within doctor's availability");
-    }
+    LocalTime startTime = request.getStartTime();
+    int slotMinutes =
+        availabilityService.resolveSlotDurationMinutes(doctor.getId(), request.getAppointmentDate(), startTime);
+    LocalTime endTime = resolveEndTime(startTime, request.getEndTime(), slotMinutes);
 
-    boolean exists = appointmentRepository.existsByDoctorIdAndAppointmentDateAndAppointmentTimeAndStatusIn(
-        doctor.getId(), request.getAppointmentDate(), request.getAppointmentTime(), blockingStatuses());
+    boolean exists = appointmentRepository.existsByDoctorIdAndAppointmentDateAndStartTimeAndStatusIn(
+        doctor.getId(), request.getAppointmentDate(), startTime, blockingStatuses());
     if (exists) {
       throw new IllegalArgumentException("Time slot is already booked");
     }
@@ -60,11 +65,15 @@ public class AppointmentService {
         .patient(patient)
         .doctor(doctor)
         .appointmentDate(request.getAppointmentDate())
-        .appointmentTime(request.getAppointmentTime())
-        .status(AppointmentStatus.PENDING)
+        .startTime(startTime)
+        .endTime(endTime)
+        .status(AppointmentStatus.REQUESTED)
+        .reason(request.getReason())
         .build();
 
     Appointment saved = appointmentRepository.save(appointment);
+    log.info("Appointment requested: id={}, doctorId={}, patientId={}, date={}, startTime={}",
+        saved.getId(), doctor.getId(), patient.getId(), saved.getAppointmentDate(), saved.getStartTime());
     return toResponse(saved);
   }
 
@@ -72,7 +81,7 @@ public class AppointmentService {
     Patient patient = patientRepository.findByUserEmail(currentUserEmail())
         .orElseThrow(() -> new ResourceNotFoundException("Patient not found"));
 
-    return appointmentRepository.findByPatientIdOrderByAppointmentDateDescAppointmentTimeDesc(patient.getId())
+    return appointmentRepository.findByPatientIdOrderByAppointmentDateDescStartTimeDesc(patient.getId())
         .stream()
         .map(this::toResponse)
         .collect(Collectors.toList());
@@ -82,7 +91,7 @@ public class AppointmentService {
     Doctor doctor = doctorRepository.findByUserEmail(currentUserEmail())
         .orElseThrow(() -> new ResourceNotFoundException("Doctor not found"));
 
-    return appointmentRepository.findByDoctorIdOrderByAppointmentDateDescAppointmentTimeDesc(doctor.getId())
+    return appointmentRepository.findByDoctorIdOrderByAppointmentDateDescStartTimeDesc(doctor.getId())
         .stream()
         .map(this::toResponse)
         .collect(Collectors.toList());
@@ -93,12 +102,7 @@ public class AppointmentService {
         .orElseThrow(() -> new ResourceNotFoundException("Appointment not found"));
 
     if (!hasRole("ROLE_ADMIN")) {
-      Doctor doctor = doctorRepository.findByUserEmail(currentUserEmail())
-          .orElseThrow(() -> new ResourceNotFoundException("Doctor not found"));
-
-      if (!appointment.getDoctor().getId().equals(doctor.getId())) {
-        throw new IllegalArgumentException("You are not allowed to update this appointment");
-      }
+      throw new IllegalArgumentException("Only admins can update appointment status");
     }
 
     appointment.setStatus(request.getStatus());
@@ -116,15 +120,14 @@ public class AppointmentService {
       throw new IllegalArgumentException("You are not allowed to accept this appointment");
     }
 
-    if (appointment.getStatus() == AppointmentStatus.CANCELLED
-        || appointment.getStatus() == AppointmentStatus.REJECTED) {
-      throw new IllegalArgumentException("Cannot accept a cancelled or rejected appointment");
+    if (appointment.getStatus() != AppointmentStatus.REQUESTED) {
+      throw new IllegalArgumentException("Only requested appointments can be accepted");
     }
 
-    boolean exists = appointmentRepository.existsByDoctorIdAndAppointmentDateAndAppointmentTimeAndStatusInAndIdNot(
+    boolean exists = appointmentRepository.existsByDoctorIdAndAppointmentDateAndStartTimeAndStatusInAndIdNot(
         doctor.getId(),
         appointment.getAppointmentDate(),
-        appointment.getAppointmentTime(),
+        appointment.getStartTime(),
         blockingStatuses(),
         appointment.getId()
     );
@@ -133,6 +136,7 @@ public class AppointmentService {
     }
 
     appointment.setStatus(AppointmentStatus.ACCEPTED);
+    log.info("Appointment accepted: id={}, doctorId={}", appointment.getId(), doctor.getId());
     return toResponse(appointment);
   }
 
@@ -147,12 +151,12 @@ public class AppointmentService {
       throw new IllegalArgumentException("You are not allowed to reject this appointment");
     }
 
-    if (appointment.getStatus() == AppointmentStatus.CANCELLED
-        || appointment.getStatus() == AppointmentStatus.COMPLETED) {
-      throw new IllegalArgumentException("Cannot reject a cancelled or completed appointment");
+    if (appointment.getStatus() != AppointmentStatus.REQUESTED) {
+      throw new IllegalArgumentException("Only requested appointments can be rejected");
     }
 
     appointment.setStatus(AppointmentStatus.REJECTED);
+    log.info("Appointment rejected: id={}, doctorId={}", appointment.getId(), doctor.getId());
     return toResponse(appointment);
   }
 
@@ -184,15 +188,15 @@ public class AppointmentService {
       }
     }
 
-    if (!availabilityService.isSlotAvailable(
-        appointment.getDoctor().getId(), request.getAppointmentDate(), request.getAppointmentTime())) {
-      throw new IllegalArgumentException("Requested time is not within doctor's availability");
-    }
+    LocalTime startTime = request.getStartTime();
+    int slotMinutes = availabilityService.resolveSlotDurationMinutes(
+        appointment.getDoctor().getId(), request.getAppointmentDate(), startTime);
+    LocalTime endTime = resolveEndTime(startTime, request.getEndTime(), slotMinutes);
 
-    boolean exists = appointmentRepository.existsByDoctorIdAndAppointmentDateAndAppointmentTimeAndStatusInAndIdNot(
+    boolean exists = appointmentRepository.existsByDoctorIdAndAppointmentDateAndStartTimeAndStatusInAndIdNot(
         appointment.getDoctor().getId(),
         request.getAppointmentDate(),
-        request.getAppointmentTime(),
+        startTime,
         blockingStatuses(),
         appointment.getId()
     );
@@ -202,8 +206,9 @@ public class AppointmentService {
     }
 
     appointment.setAppointmentDate(request.getAppointmentDate());
-    appointment.setAppointmentTime(request.getAppointmentTime());
-    appointment.setStatus(AppointmentStatus.PENDING);
+    appointment.setStartTime(startTime);
+    appointment.setEndTime(endTime);
+    appointment.setStatus(AppointmentStatus.REQUESTED);
 
     return toResponse(appointment);
   }
@@ -218,21 +223,16 @@ public class AppointmentService {
     return appointmentRepository.findAll(spec, pageable).map(this::toResponse);
   }
 
-  private Patient resolvePatientForBooking(AppointmentBookRequest request) {
-    if (hasRole("ROLE_PATIENT")) {
-      return patientRepository.findByUserEmail(currentUserEmail())
-          .orElseThrow(() -> new ResourceNotFoundException("Patient not found"));
-    }
+  public com.hospital.availability.dto.AvailableSlotsResponse getAvailableSlots(Long doctorId, LocalDate date) {
+    return availabilityService.getAvailableSlots(doctorId, date);
+  }
 
-    if (hasRole("ROLE_RECEPTIONIST") || hasRole("ROLE_ADMIN")) {
-      if (request.getPatientId() == null) {
-        throw new IllegalArgumentException("Patient id is required for receptionist/admin booking");
-      }
-      return patientRepository.findById(request.getPatientId())
-          .orElseThrow(() -> new ResourceNotFoundException("Patient not found"));
+  private Patient resolvePatientForBooking() {
+    if (!hasRole("ROLE_PATIENT")) {
+      throw new IllegalArgumentException("Only patients can request appointments");
     }
-
-    throw new IllegalArgumentException("You are not allowed to book appointments");
+    return patientRepository.findByUserEmail(currentUserEmail())
+        .orElseThrow(() -> new ResourceNotFoundException("Patient not found"));
   }
 
   private String currentUserEmail() {
@@ -254,16 +254,32 @@ public class AppointmentService {
         appointment.getPatient().getId(),
         appointment.getDoctor().getId(),
         appointment.getAppointmentDate(),
-        appointment.getAppointmentTime(),
-        appointment.getStatus()
+        appointment.getStartTime(),
+        appointment.getEndTime(),
+        appointment.getStatus(),
+        appointment.getReason()
     );
   }
 
   private List<AppointmentStatus> blockingStatuses() {
     return List.of(
-        AppointmentStatus.PENDING,
+        AppointmentStatus.REQUESTED,
         AppointmentStatus.ACCEPTED,
         AppointmentStatus.COMPLETED
     );
+  }
+
+  private LocalTime resolveEndTime(LocalTime startTime, LocalTime endTime, int slotMinutes) {
+    if (startTime == null) {
+      throw new IllegalArgumentException("Start time is required");
+    }
+    LocalTime computed = startTime.plusMinutes(slotMinutes);
+    if (endTime == null) {
+      return computed;
+    }
+    if (!endTime.equals(computed)) {
+      throw new IllegalArgumentException("End time must match slot duration");
+    }
+    return endTime;
   }
 }
